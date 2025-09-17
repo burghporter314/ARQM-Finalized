@@ -1,5 +1,6 @@
 import pandas as pd
 from datasets import Dataset
+from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, BertForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding, BitsAndBytesConfig
 from sklearn.model_selection import KFold
 from transformers import EarlyStoppingCallback, pipeline
@@ -18,7 +19,8 @@ import shap
 import time
 
 import nlpaug.augmenter.word as naw
-
+import hnswlib
+from bertviz import head_view
 
 max_length = 32
 
@@ -26,10 +28,10 @@ nltk.download('wordnet')
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
 
-def train(load_saved = False, save_result = False, num_synthetic = 0, rebalance_classes = False, truncate_beginning_words=0, metric_for_best_model="eval_loss", model_name="bert-base-uncased", max_length=32, k_folds=5, train_batch_size = 4, eval_batch_size = 4, epochs=10):
+def train(load_saved = False, save_result = False, num_synthetic = 0, rebalance_classes = False, truncate_beginning_words=4, metric_for_best_model="eval_loss", model_name="bert-base-uncased", max_length=32, k_folds=5, train_batch_size = 4, eval_batch_size = 4, epochs=10):
 
     # Load dataset
-    file_path = "app/datasets/requirement_quality/dataset.xlsx"  # Update this path
+    file_path = "app/datasets/requirement_quality/dataset.xlsx"
     df = pd.read_excel(file_path)
 
     # Convert 'T'/'F' to binary labels (1 and 0)
@@ -50,7 +52,7 @@ def train(load_saved = False, save_result = False, num_synthetic = 0, rebalance_
 
     # Convert text column to string
     df["requirement"] = df["requirement"].astype(str)
-    df = df.drop("result", axis=1)
+    # df = df.drop("result", axis=1)
 
     if(num_synthetic > 0):
 
@@ -121,6 +123,36 @@ def train(load_saved = False, save_result = False, num_synthetic = 0, rebalance_
         lambda x: " ".join(x.split()[truncate_beginning_words:])
     )
 
+
+    # RAG
+
+    external_knowledge = [
+        "superlatives",
+        "subjective language",
+        "vague pronouns",
+        "ambiguous terms",
+        "open-ended, non-verifiable terms",
+        "comparative phrases",
+        "loopholes",
+        "terms that imply totality",
+        "multiple <verb or verb phrase>"
+    ]
+
+    # retrieval_corpus = df["requirement"].tolist()
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    # rag_embeddings = embedder.encode(retrieval_corpus)
+    rag_embeddings = embedder.encode(external_knowledge)
+
+    index = hnswlib.Index(space='cosine', dim=rag_embeddings.shape[1])
+    index.init_index(max_elements=2000, ef_construction=200, M=16)
+    index.add_items(rag_embeddings)
+
+    def retrieve_context(query, k=3):
+        query_vec = embedder.encode([query])
+        ids, _ = index.knn_query(query_vec, k=k)
+        return " ".join([external_knowledge[i] for i in ids[0]])
+
+
     # Convert dataset to Hugging Face Dataset format
     dataset = Dataset.from_pandas(df)
 
@@ -132,6 +164,21 @@ def train(load_saved = False, save_result = False, num_synthetic = 0, rebalance_
             max_length=max_length,
             padding="max_length"
         )
+
+    # def tokenize_function(examples):
+    #     queries = examples["requirement"]
+    #     inputs = []
+    #     for q in queries:
+    #         context = retrieve_context(q)
+    #         combined = q + " " + context
+    #         inputs.append(combined)
+    #
+    #     return tokenizer(
+    #         inputs,
+    #         truncation=True,
+    #         max_length=max_length,
+    #         padding="max_length"
+    #     )
 
     # Correctly map labels
     def label_map(example):
@@ -294,6 +341,7 @@ def test(num_tests=10):
 
         with torch.no_grad():
             outputs = model(**inputs)
+            
         logits = outputs.logits
         probs = torch.sigmoid(logits).cpu().numpy()
 
@@ -343,8 +391,8 @@ def test(num_tests=10):
 
 start_time = time.time()  # Start timing
 
-train(load_saved = False, save_result = True, model_name='distilbert-base-uncased', num_synthetic=2000, rebalance_classes=False, k_folds = 10, train_batch_size = 16, eval_batch_size=16, epochs = 5)
-test(num_tests=500)
+train(load_saved = False, save_result = True, model_name='bert-base-uncased', num_synthetic=0, rebalance_classes=False, k_folds = 10, train_batch_size = 16, eval_batch_size=16, epochs = 8)
+test(num_tests=10)
 
 end_time = time.time()  # End timing
 print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")

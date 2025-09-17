@@ -6,7 +6,7 @@ label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result
 import shap
 import re
 from scipy.ndimage import gaussian_filter1d
-
+import numpy as np
 from reportlab.lib import colors
 
 label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result_binary_singularity",
@@ -21,7 +21,7 @@ LABEL_MAPPING = {
 
 class BertWrapper:
 
-    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True, explainer_max_evals=500, model_path='app/models/requirement_quality/bert-requirement-classifier'):
+    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True, explainer_max_evals=400, model_path='app/models/requirement_quality/bert-requirement-classifier'):
 
         self.violation_threshold=violation_threshold
         self.max_n_grams=max_n_grams
@@ -198,9 +198,9 @@ class BertWrapper:
         if severity_scores:
             avg_severity = sum(severity_scores) / len(severity_scores)
             overall_score = avg_severity * 100
-            c.drawString(x, y, f"Overall Quality Score: {overall_score:.2f}%")
-        else:
-            c.drawString(x, y, f"Overall Quality Score: 100.00% (No violations found)")
+            # c.drawString(x, y, f"Overall Quality Score: {overall_score:.2f}%")
+        # else:
+            # c.drawString(x, y, f"Overall Quality Score: 100.00% (No violations found)")
         y -= 40
 
         c.setFont("Helvetica-Bold", 11)
@@ -254,9 +254,12 @@ class BertWrapper:
             if show_average and impacts_list:
                 total_weight = sum(weights) or 1.0
                 weighted_avg = [
-                    sum(val * weight for val, weight in zip(vals, weights)) / total_weight
+                    sum(val * 1 for val, weight in zip(vals, weights)) / len(req_to_weights[req_index])
                     for vals in zip(*impacts_list)
                 ]
+
+                weighted_avg = np.min(impacts_list, axis=0)
+
                 if y < min_y_threshold + line_height * 4:
                     c.showPage()
                     x, y = x_start, y_start
@@ -378,7 +381,7 @@ class BertWrapper:
 
         c.save()
 
-    def predict_requirement_v2(self, texts, word_offset_percent=0.2):
+    def predict_requirement_v2(self, texts, word_offset_percent=0.25, visualize_pdf = True):
 
         truncated_texts = []
         for text in texts:
@@ -400,42 +403,47 @@ class BertWrapper:
         logits = outputs.logits
         probs = torch.sigmoid(logits).cpu().numpy()
 
-        explain_indices = []
-        for i in range(len(truncated_texts)):
-            p = probs[i]
-            if p[0] > self.violation_threshold or any(p[j] < 1 - self.violation_threshold for j in [1, 2, 3]):
-                explain_indices.append(i)
+        if(visualize_pdf == False):
+            return probs
 
-        shap_values = self.explainer([truncated_texts[i] for i in explain_indices]) if explain_indices else None
+        else:
+            explain_indices = []
+            for i in range(len(truncated_texts)):
+                p = probs[i]
+                if p[0] > self.violation_threshold or any(p[j] < 1 - self.violation_threshold for j in [1, 2, 3]):
+                    explain_indices.append(i)
 
-        visualization_data = []
+            shap_values = self.explainer([truncated_texts[i] for i in explain_indices]) if explain_indices else None
 
-        for i in range(len(truncated_texts)):
-            if i in explain_indices:
-                sv_idx = explain_indices.index(i)
-                words = shap_values.data[sv_idx]
+            visualization_data = []
 
-                for j, label in enumerate(label_columns):
-                    p = probs[i][j]
-                    if (j == 0 and p > self.violation_threshold) or (j in [1, 2, 3] and p < 1 - self.violation_threshold):
-                        shap_scores = shap_values.values[sv_idx][:, j]
-                        impacts = [0.0] * len(words)
-                        ngram_summary = []
+            for i in range(len(truncated_texts)):
+                if i in explain_indices:
+                    sv_idx = explain_indices.index(i)
+                    words = shap_values.data[sv_idx]
 
-                        words = list(map(str, shap_values.data[sv_idx]))
-                        for n in range(1, self.max_n_grams + 1):
-                            top_ngrams = self.__get_top_ngrams__(words, shap_scores, n=n)
-                            for ngram, score in top_ngrams:
-                                ngram_summary.append((n, ngram, score))
-                                ngram_tokens = ngram.split()
-                                for k in range(len(words) - len(ngram_tokens) + 1):
-                                    if words[k:k + len(ngram_tokens)] == ngram_tokens:
-                                        for t in range(len(ngram_tokens)):
-                                            impacts[k + t] += score
+                    for j, label in enumerate(label_columns):
+                        p = probs[i][j]
+                        if (j == 0 and p > self.violation_threshold) or (j in [1, 2, 3] and p < 1 - self.violation_threshold):
+                            shap_scores = shap_values.values[sv_idx][:, j]
+                            impacts = [0.0] * len(words)
+                            ngram_summary = []
 
-                        # Add to visualization list
-                        certainty = probs[i][j] * 100
-                        visualization_data.append((texts[i], truncated_texts[i], words, impacts, ngram_summary, i, label, certainty))
+                            words = list(map(str, shap_values.data[sv_idx]))
+                            for n in range(1, self.max_n_grams + 1):
+                                top_ngrams = self.__get_top_ngrams__(words, shap_scores, n=n)
+                                for ngram, score in top_ngrams:
+                                    ngram_summary.append((n, ngram, score))
+                                    ngram_tokens = ngram.split()
+                                    for k in range(len(words) - len(ngram_tokens) + 1):
+                                        if words[k:k + len(ngram_tokens)] == ngram_tokens:
+                                            for t in range(len(ngram_tokens)):
+                                                impacts[k + t] += score
 
-        if visualization_data:
-            self.__visualize_explanations_to_pdf__(visualization_data)
+                            # Add to visualization list
+                            certainty = probs[i][j] * 100
+                            visualization_data.append((texts[i], truncated_texts[i], words, impacts, ngram_summary, i, label, certainty))
+
+            if visualization_data:
+                self.__visualize_explanations_to_pdf__(visualization_data)
+            return probs
