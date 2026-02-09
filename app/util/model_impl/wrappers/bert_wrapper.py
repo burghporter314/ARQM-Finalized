@@ -21,7 +21,7 @@ LABEL_MAPPING = {
 
 class BertWrapper:
 
-    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True, explainer_max_evals=400, model_path='app/models/requirement_quality/bert-requirement-classifier'):
+    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True, explainer_max_evals=50, model_path='app/models/requirement_quality/bert-requirement-classifier'):
 
         self.violation_threshold=violation_threshold
         self.max_n_grams=max_n_grams

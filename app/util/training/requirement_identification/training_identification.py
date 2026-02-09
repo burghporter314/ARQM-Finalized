@@ -28,10 +28,12 @@ from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 from nltk.stem import WordNetLemmatizer
+from tensorflow.keras.models import clone_model
+
 
 QUALITY_FILE_NAME = 'dataset_finalized.xlsx'
 
-def load_and_preprocess(load_quality = True, load_reviewer = True, index = 4):
+def load_and_preprocess(load_quality = True, load_reviewer = True, index = 4, random_state=42):
 
     # Load dataset
     if(load_quality == False):
@@ -83,28 +85,28 @@ def load_and_preprocess(load_quality = True, load_reviewer = True, index = 4):
         df_minority,
         replace=True,
         n_samples=len(df_majority),
-        random_state=42
+        random_state=random_state
     )
 
-    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=random_state).reset_index(drop=True)
 
-    # Lemmatization of the various strings
+    # # Lemmatization of the various strings
     lemmatizer = WordNetLemmatizer()
     df['text'] = df['text'].apply(lambda x: ' '.join([lemmatizer.lemmatize(w) for w in x.split()]))
 
     # Preprocessing
-    vectorizer = CountVectorizer(max_features=500)
+    vectorizer = CountVectorizer(max_features=500, stop_words='english')
     X = vectorizer.fit_transform(df['text']).toarray()
     y = df['classification'].values
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=35)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=random_state)
 
     return X_train, X_test, y_train, y_test, vectorizer
 
 
 
 
-def load_and_preprocess_embedding(load_quality = True, index = 4):
+def load_and_preprocess_embedding(load_quality = True, index = 4, random_state=42):
 
     if(load_quality == False):
         df = pd.read_csv('app/datasets/requirement_identification/PURE_train.csv')
@@ -124,10 +126,10 @@ def load_and_preprocess_embedding(load_quality = True, index = 4):
         df_minority,
         replace=True,
         n_samples=len(df_majority),
-        random_state=42
+        random_state=random_state
     )
 
-    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=random_state).reset_index(drop=True)
 
     # Lemmatization and tokenization
     lemmatizer = WordNetLemmatizer()
@@ -153,15 +155,13 @@ def load_and_preprocess_embedding(load_quality = True, index = 4):
     y = df['classification'].values
 
     # Split into train and test sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=35)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=random_state)
 
     return X_train, X_test, y_train, y_test, word2vec_model
 
 
 
-
-
-def load_and_preprocess_cnn_rnn(vocab_size=1000, max_len=100, load_quality = True, index = 4, load_reviewer=True):
+def load_and_preprocess_cnn_rnn(vocab_size=1000, max_len=100, load_quality = True, index = 4, load_reviewer=True, random_state=42):
 
     if(load_quality == False):
         if (load_reviewer):
@@ -209,17 +209,17 @@ def load_and_preprocess_cnn_rnn(vocab_size=1000, max_len=100, load_quality = Tru
         df_minority,
         replace=True,
         n_samples=len(df_majority),
-        random_state=42
+        random_state=random_state
     )
 
-    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=42).reset_index(drop=True)
+    df = pd.concat([df_majority, df_minority_upsampled]).sample(frac=1, random_state=random_state).reset_index(drop=True)
 
     print(df['classification'].value_counts())
 
     X = df['text'].values
     y = df['classification'].values
 
-    X_train_raw, X_test_raw, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=35)
+    X_train_raw, X_test_raw, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=random_state)
 
     tokenizer = Tokenizer(num_words=vocab_size)
     tokenizer.fit_on_texts(X_train_raw)
@@ -282,7 +282,7 @@ def get_linear_regression_model():
     return LinearRegression()
 
 def get_logistic_regression_model():
-    return LogisticRegression()
+    return LogisticRegression(max_iter=500)
 
 def get_naive_bayes_model():
     return MultinomialNB()
@@ -357,17 +357,75 @@ def get_rnn_model(vocab_size=250, max_len=100):
 
     return model
 
-def train_linear_regression():
+def train_kfold(kfold, model, X, y, **params):
+    kf = KFold(n_splits=kfold, shuffle=True, random_state=42)
+
+    results = []
+    model_orig = clone_model(model)
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+
+    for train_index, test_index in kf.split(X):
+        X_train_k, X_test_k = X[train_index], X[test_index]
+        y_train_k, y_test_k = y[train_index], y[test_index]
+        model = clone_model(model_orig)
+        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+        model.fit(X_train_k, y_train_k, **params)
+
+        y_pred = model.predict(X_test_k)
+
+        y_pred = (y_pred > 0.5).astype(int)
+
+        report = classification_report(
+            y_test_k,
+            y_pred,
+            output_dict=True,
+            target_names=["Class 0", "Class 1"]
+        )
+
+        acc = accuracy_score(y_test_k, y_pred)
+
+        results.append({
+            "class_0_precision": report["Class 0"]["precision"],
+            "class_0_recall": report["Class 0"]["recall"],
+            "class_0_f1": report["Class 0"]["f1-score"],
+            "accuracy": acc,
+            "class_1_precision": report["Class 1"]["precision"],
+            "class_1_recall": report["Class 1"]["recall"],
+            "class_1_f1": report["Class 1"]["f1-score"],
+            "accuracy_1": acc,
+        })
+
+        print(classification_report(y_test_k, y_pred, target_names=["Class 0", "Class 1"]))
+        df_results = pd.DataFrame(results)
+
+        df_results = pd.concat([df_results], ignore_index=True)
+
+        # Export to Excel
+        df_results.to_excel("kfold_results.xlsx", index=False)
+
+        print(report)
+
+
+def train_linear_regression(kfold=10):
 
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
-
-    # Fit the linear regression model
     model = get_linear_regression_model()
-    model.fit(X_train, y_train)
 
-    # Predict using linear regression. Since it returns probabilities, convert to 0 and 1.
-    y_pred = model.predict(X_test)
-    y_pred = (y_pred > 0.5).astype(int)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
+
+        train_kfold(kfold, model, X, y)
+    else:
+
+        # Fit the linear regression model
+        model.fit(X_train, y_train)
+
+        # Predict using linear regression. Since it returns probabilities, convert to 0 and 1.
+        y_pred = model.predict(X_test)
+        y_pred = (y_pred > 0.5).astype(int)
 
     # visualize(y_test, y_pred, "Linear Regression Confusion Matrix")
     #
@@ -386,122 +444,157 @@ def train_linear_regression():
     # for i in top_neg_idx:
     #     print(f"{feature_names[i]}", end="\t")
 
-    return y_pred
+        return y_pred
 
 
-def train_logistic_regression():
+def train_logistic_regression(kfold=10):
 
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
     model = get_logistic_regression_model()
-    model.fit(X_train, y_train)
 
-    y_pred = model.predict(X_test)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    # visualize(y_test, y_pred, "Logistic Regression Confusion Matrix")
-    #
-    # feature_names = vectorizer.get_feature_names_out()
-    # coefficients = model.coef_[0]
-    #
-    # # Sort by absolute value (most influential)
-    # top_n = 10
-    # top_positive_indices = np.argsort(coefficients)[-top_n:]
-    # top_negative_indices = np.argsort(coefficients)[:top_n]
-    #
-    # print("Top positive words:")
-    # for i in reversed(top_positive_indices):
-    #     print(f"{feature_names[i]}", end="\t")
-    #
-    # print("\nTop negative words:")
-    # for i in top_negative_indices:
-    #     print(f"{feature_names[i]}", end="\t")
+        train_kfold(kfold, model, X, y)
+    else:
 
-    return y_pred
+        model.fit(X_train, y_train)
+
+        y_pred = model.predict(X_test)
+
+        # visualize(y_test, y_pred, "Logistic Regression Confusion Matrix")
+        #
+        # feature_names = vectorizer.get_feature_names_out()
+        # coefficients = model.coef_[0]
+        #
+        # # Sort by absolute value (most influential)
+        # top_n = 10
+        # top_positive_indices = np.argsort(coefficients)[-top_n:]
+        # top_negative_indices = np.argsort(coefficients)[:top_n]
+        #
+        # print("Top positive words:")
+        # for i in reversed(top_positive_indices):
+        #     print(f"{feature_names[i]}", end="\t")
+        #
+        # print("\nTop negative words:")
+        # for i in top_negative_indices:
+        #     print(f"{feature_names[i]}", end="\t")
+
+        return y_pred
 
 
-def train_naive_bayes():
+def train_naive_bayes(kfold=10):
 
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
     model = get_naive_bayes_model()
-    model.fit(X_train, y_train)
 
-    y_pred = model.predict(X_test)
-    # visualize(y_test, y_pred, "Naive Bayes Confusion Matrix")
-    #
-    # feature_names = vectorizer.get_feature_names_out()
-    # log_probs = model.feature_log_prob_
-    #
-    # # Difference in log-probabilities between class 1 and class 0
-    # log_prob_diff = log_probs[1] - log_probs[0]
-    #
-    # top_n = 10
-    # top_pos_idx = np.argsort(log_prob_diff)[-top_n:]
-    # top_neg_idx = np.argsort(log_prob_diff)[:top_n]
-    #
-    # print("Top words pushing toward class 1:")
-    # for i in reversed(top_pos_idx):
-    #     print(f"{feature_names[i]}", end="\t")
-    #
-    # print("\nTop words pushing toward class 0:")
-    # for i in top_neg_idx:
-    #     print(f"{feature_names[i]}", end="\t")
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    return y_pred
+        train_kfold(kfold, model, X, y)
+    else:
 
-def train_svm():
+        model.fit(X_train, y_train)
+
+        y_pred = model.predict(X_test)
+        # visualize(y_test, y_pred, "Naive Bayes Confusion Matrix")
+        #
+        # feature_names = vectorizer.get_feature_names_out()
+        # log_probs = model.feature_log_prob_
+        #
+        # # Difference in log-probabilities between class 1 and class 0
+        # log_prob_diff = log_probs[1] - log_probs[0]
+        #
+        # top_n = 10
+        # top_pos_idx = np.argsort(log_prob_diff)[-top_n:]
+        # top_neg_idx = np.argsort(log_prob_diff)[:top_n]
+        #
+        # print("Top words pushing toward class 1:")
+        # for i in reversed(top_pos_idx):
+        #     print(f"{feature_names[i]}", end="\t")
+        #
+        # print("\nTop words pushing toward class 0:")
+        # for i in top_neg_idx:
+        #     print(f"{feature_names[i]}", end="\t")
+
+        return y_pred
+
+def train_svm(kfold=10):
 
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
     model = get_svm_model()
-    model.fit(X_train, y_train)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    y_pred = model.predict(X_test)
-    y_pred = (y_pred > 0.5).astype(int)
+        train_kfold(kfold, model, X, y)
+    else:
+        model.fit(X_train, y_train)
 
-    # visualize(y_test, y_pred, "SVM Confusion Matrix")
-    #
-    # coefficients = model.coef_.ravel()
-    # feature_names = vectorizer.get_feature_names_out()
-    #
-    # top_n = 10
-    # top_pos_idx = np.argsort(coefficients)[-top_n:]
-    # top_neg_idx = np.argsort(coefficients)[:top_n]
-    #
-    # print("Top words pushing toward class 1:")
-    # for i in reversed(top_pos_idx):
-    #     print(f"{feature_names[i]}", end="\t")
-    #
-    # print("\nTop words pushing toward class 0:")
-    # for i in top_neg_idx:
-    #     print(f"{feature_names[i]}", end="\t")
+        y_pred = model.predict(X_test)
+        y_pred = (y_pred > 0.5).astype(int)
 
-    return y_pred
+        # visualize(y_test, y_pred, "SVM Confusion Matrix")
+        #
+        # coefficients = model.coef_.ravel()
+        # feature_names = vectorizer.get_feature_names_out()
+        #
+        # top_n = 10
+        # top_pos_idx = np.argsort(coefficients)[-top_n:]
+        # top_neg_idx = np.argsort(coefficients)[:top_n]
+        #
+        # print("Top words pushing toward class 1:")
+        # for i in reversed(top_pos_idx):
+        #     print(f"{feature_names[i]}", end="\t")
+        #
+        # print("\nTop words pushing toward class 0:")
+        # for i in top_neg_idx:
+        #     print(f"{feature_names[i]}", end="\t")
 
-def train_random_forest():
+        return y_pred
+
+def train_random_forest(kfold=10):
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
     model = get_random_forest_model()
-    model.fit(X_train, y_train)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    y_pred = model.predict(X_test)
-    # visualize(y_test, y_pred, "Random Forest Confusion Matrix")
+        train_kfold(kfold, model, X, y)
+    else:
 
-    return y_pred
+        model.fit(X_train, y_train)
 
-def train_knn():
+        y_pred = model.predict(X_test)
+        # visualize(y_test, y_pred, "Random Forest Confusion Matrix")
+
+        return y_pred
+
+def train_knn(kfold=10):
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
     model = get_knn_model()
-    model.fit(X_train, y_train)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    y_pred = model.predict(X_test)
-    # visualize(y_test, y_pred, "KNN Confusion Matrix")
+        train_kfold(kfold, model, X, y)
+    else:
+        model.fit(X_train, y_train)
 
-    return y_pred
+        y_pred = model.predict(X_test)
+        # visualize(y_test, y_pred, "KNN Confusion Matrix")
+
+        return y_pred
 
 
-def train_ann():
+def train_ann(kfold=10):
 
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
 
@@ -509,32 +602,47 @@ def train_ann():
 
     model = get_ann_model(input_dim)
 
-    model.fit(X_train, y_train, epochs=500, batch_size=32, verbose=2)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    y_pred = model.predict(X_test)
-    y_pred = (y_pred > 0.5).astype(int)
+        train_kfold(kfold, model, X, y, epochs=25, batch_size=8, verbose=2)
+    else:
 
-    # visualize(y_test, y_pred, "ANN Confusion Matrix")
+        model.fit(X_train, y_train, epochs=500, batch_size=32, verbose=2)
 
-    return y_pred
+        y_pred = model.predict(X_test)
+        y_pred = (y_pred > 0.5).astype(int)
 
-def train_cnn(vocab_size=1000, max_len=500):
+        # visualize(y_test, y_pred, "ANN Confusion Matrix")
+
+        return y_pred
+
+def train_cnn(kfold=10, vocab_size=1000, max_len=500):
 
     X_train, X_test, y_train, y_test, _, _, vectorizer = load_and_preprocess_cnn_rnn()
 
     model = get_cnn_model()
 
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-    model.fit(X_train, y_train, epochs=25, batch_size=32, verbose=1, validation_data=(X_test, y_test))
 
-    y_pred = model.predict(X_test)
-    y_pred = (y_pred > 0.5).astype(int)
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    # visualize(y_test, y_pred, "CNN Confusion Matrix")
+        train_kfold(kfold, model, X, y, epochs=16, batch_size=8, verbose=1, validation_data=(X_test, y_test))
+    else:
 
-    return y_pred
+        model.fit(X_train, y_train, epochs=25, batch_size=32, verbose=1, validation_data=(X_test, y_test))
 
-def train_rnn(vocab_size=1000, max_len=100):
+        y_pred = model.predict(X_test)
+        y_pred = (y_pred > 0.5).astype(int)
+
+        # visualize(y_test, y_pred, "CNN Confusion Matrix")
+
+        return y_pred
+
+def train_rnn(kfold=10, vocab_size=1000, max_len=100):
 
     X_train, X_test, y_train, y_test, _, _, tokenizer = load_and_preprocess_cnn_rnn(vocab_size, max_len)
 
@@ -542,14 +650,21 @@ def train_rnn(vocab_size=1000, max_len=100):
 
     model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-    model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=1, validation_data=(X_test, y_test))
+    if(kfold > 0):
+        X = np.concatenate((X_train, X_test))
+        y = np.concatenate((y_train, y_test))
 
-    y_pred = model.predict(X_test)
-    y_pred = (y_pred > 0.5).astype(int)
+        train_kfold(kfold, model, X, y, epochs=20, batch_size=32, verbose=1, validation_data=(X_test, y_test))
+    else:
 
-    # visualize(y_test, y_pred, "RNN Confusion Matrix")
+        model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=1, validation_data=(X_test, y_test))
 
-    return y_pred
+        y_pred = model.predict(X_test)
+        y_pred = (y_pred > 0.5).astype(int)
+
+        # visualize(y_test, y_pred, "RNN Confusion Matrix")
+
+        return y_pred
 
 def train_meta_random_forest_prediction():
     X_train, X_test, y_train, y_test, vectorizer = load_and_preprocess()
@@ -768,10 +883,10 @@ def train_meta_bert_prediction():
     for i in top_negative_indices:
         print(f"{feature_names[i]}", end="\t")
 
-def train_ensemble(vocab_size=5000, max_len=100):
+def train_ensemble(vocab_size=5000, max_len=100, random_state=42):
     # Preprocess data for traditional models and deep learning models
-    X_train_traditional, X_test_traditional, y_train, y_test, vectorizer = load_and_preprocess()
-    X_train_cnn_rnn, X_test_cnn_rnn, _, _, _, _, tokenizer = load_and_preprocess_cnn_rnn(vocab_size, max_len)
+    X_train_traditional, X_test_traditional, y_train, y_test, vectorizer = load_and_preprocess(random_state=random_state)
+    X_train_cnn_rnn, X_test_cnn_rnn, _, _, _, _, tokenizer = load_and_preprocess_cnn_rnn(vocab_size, max_len, random_state=random_state)
 
     # Define models
     models_traditional = {
@@ -807,10 +922,10 @@ def train_ensemble(vocab_size=5000, max_len=100):
     for name, model in models_dl.items():
         if name == 'cnn':
             model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-            model.fit(X_train_cnn_rnn, y_train, epochs=100, batch_size=32, verbose=1)
+            model.fit(X_train_cnn_rnn, y_train, epochs=25, batch_size=32, verbose=1)
         else:
             model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
-            model.fit(X_train_cnn_rnn, y_train, epochs=100, batch_size=32, verbose=1)
+            model.fit(X_train_cnn_rnn, y_train, epochs=25, batch_size=32, verbose=1)
 
         train_predictions[name] = model.predict(X_train_cnn_rnn).flatten()
         test_predictions[name] = model.predict(X_test_cnn_rnn).flatten()
@@ -823,13 +938,11 @@ def train_ensemble(vocab_size=5000, max_len=100):
     avg_probs_test = np.mean(stacked_test, axis=1)
     avg_ensemble_preds = (avg_probs_test > 0.5).astype(int)
     print("Average Ensemble")
-    visualize(y_test, avg_ensemble_preds, "Average Ensemble")
 
     # --- Majority Vote Ensemble ---
     binary_preds_test = (stacked_test > 0.5).astype(int)
     majority_vote_preds = (np.sum(binary_preds_test, axis=1) > (binary_preds_test.shape[1] / 2)).astype(int)
     print("Majority Vote Ensemble")
-    visualize(y_test, majority_vote_preds, "Majority Vote Ensemble")
 
     # Train and evaluate Logistic Regression meta-model
     meta_model_lr = LogisticRegression()
@@ -837,18 +950,24 @@ def train_ensemble(vocab_size=5000, max_len=100):
     ensemble_preds_lr = meta_model_lr.predict(stacked_test)
     print("Logistic Regression Meta-Model")
 
-    visualize(y_test, ensemble_preds_lr, "Logist Regression Meta-Model")
-
     # Train and evaluate Gradient Boosting meta-model
     meta_model_gb = GradientBoostingClassifier()
     meta_model_gb.fit(stacked_train, y_train)
     ensemble_preds_gb = meta_model_gb.predict(stacked_test)
     print("Gradient Boosting Meta-Model")
     print(classification_report(y_test, ensemble_preds_gb))
-    visualize(y_test, ensemble_preds_gb, "Gradient Boosting Meta-Model")
+
+    return {
+        "average_ensemble": classification_report(y_test, avg_ensemble_preds, target_names=["Class 0", "Class 1"], output_dict=True),
+        "majority_vote_ensemble": classification_report(y_test, majority_vote_preds, target_names=["Class 0", "Class 1"], output_dict=True),
+        "logistic_regression_meta_model": classification_report(y_test, ensemble_preds_lr, target_names=["Class 0", "Class 1"], output_dict=True),
+        "gradient_boost_meta_model": classification_report(y_test, ensemble_preds_gb, target_names=["Class 0", "Class 1"], output_dict=True)
+    }
 
 
-def train_bert(load_quality = True, index = 4, load_reviewer = True):
+
+
+def train_bert(load_quality = True, index = 4, load_reviewer = True, random_state=42):
 
 
     if(load_quality == False):
@@ -889,6 +1008,7 @@ def train_bert(load_quality = True, index = 4, load_reviewer = True):
     print(df['classification'].value_counts())
 
     df['classification'] = df['classification'].map({True: 1, False: 0})
+    # df['classification'] = df['classification'].map({'T': 1, 'F': 0})
 
     # Rebalance
 
@@ -899,7 +1019,7 @@ def train_bert(load_quality = True, index = 4, load_reviewer = True):
     oversampled_minority = minority_class.sample(len(majority_class), replace=True)
 
     # Combine to get the balanced dataset
-    df = pd.concat([majority_class, oversampled_minority], axis=0).sample(frac=1).reset_index(drop=True)
+    df = pd.concat([majority_class, oversampled_minority], axis=0).sample(frac=1, random_state=random_state).reset_index(drop=True)
 
     df['text'] = df['text'].astype(str)
 
@@ -915,9 +1035,160 @@ def train_bert(load_quality = True, index = 4, load_reviewer = True):
     #                                                       num_labels=2)
 
     model = BertForSequenceClassification.from_pretrained("distilbert-base-uncased",
-                                                          hidden_dropout_prob=0.3,
-                                                          attention_probs_dropout_prob=0.3,
+                                                          hidden_dropout_prob=0.2,
+                                                          attention_probs_dropout_prob=0.2,
                                                           num_labels=2)
+
+    dataset = Dataset.from_pandas(df)
+
+    def tokenize_function(examples):
+        return tokenizer(
+            examples['text'],
+            truncation=True,
+            max_length=32,
+            padding="max_length"
+        )
+
+
+    tokenized_dataset = dataset.map(tokenize_function, batched=True)
+    tokenized_dataset = tokenized_dataset.map(lambda examples: {'labels': examples['classification']}, batched=True)
+
+    split_dataset = tokenized_dataset.train_test_split(test_size=0.3)
+
+    train_dataset = split_dataset['train']
+    eval_dataset = split_dataset['test']
+
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+
+    def compute_metrics(pred):
+        labels = pred.label_ids
+        preds = np.argmax(pred.predictions, axis=1)
+
+        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average=None)
+        accuracy = accuracy_score(labels, preds)
+
+        metrics = {
+            'accuracy': accuracy
+        }
+
+        for i in range(len(precision)):
+            metrics[f'precision_class_{i}'] = precision[i]
+            metrics[f'recall_class_{i}'] = recall[i]
+            metrics[f'f1_class_{i}'] = f1[i]
+
+        return metrics
+
+    training_args = TrainingArguments(
+        output_dir='../bert-binary-classification-results',
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=1,
+        learning_rate=2e-5,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
+        num_train_epochs=15,
+        weight_decay=0.05,
+        load_best_model_at_end=True,
+        greater_is_better=True,
+        metric_for_best_model="eval_accuracy",
+        logging_strategy="epoch"
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+    )
+
+    trainer.train()
+
+    test_predictions = trainer.predict(eval_dataset)
+    test_labels = test_predictions.label_ids
+    test_preds = np.argmax(test_predictions.predictions, axis=1)
+
+    print("Classification Report for Test Data")
+    # visualize(test_labels, test_preds, "BERT Confusion Matrix")
+    print(classification_report(test_labels, test_preds, target_names=["Class 0 (F)", "Class 1 (T)"]))
+
+    model.save_pretrained("../models/bert-base-requirements-identification-generative-ai")
+    return classification_report(test_labels, test_preds, target_names=["Class 0", "Class 1"], output_dict=True)
+
+
+def train_xl_net(load_quality = True, index = 4, load_reviewer = True, random_state=42):
+
+
+    if(load_quality == False):
+        if (load_reviewer):
+            files = [
+                "app/util/validation/datasets/requirement_identification/reviewer_1/dataset_1_unlabeled_req.xlsx",
+                "app/util/validation/datasets/requirement_identification/reviewer_2/dataset_2_unlabeled_req.xlsx",
+                "app/util/validation/datasets/requirement_identification/reviewer_3/dataset_3_unlabeled_req.xlsx",
+                "app/util/validation/datasets/requirement_identification/reviewer_3/dataset_4_unlabeled_req.xlsx",
+                "app/util/validation/datasets/requirement_identification/reviewer_4/dataset_5_unlabeled_req.xlsx",
+                "app/util/validation/datasets/requirement_identification/reviewer_5/dataset_6_unlabeled_req.xlsx"
+            ]
+            df = pd.concat((pd.read_excel(f) for f in files), ignore_index=True)
+        else:
+            df = pd.read_csv('app/datasets/requirement_identification/PURE_train.csv')
+    else:
+
+        if (load_reviewer):
+            files = [
+                "app/util/validation/datasets/requirement_quality/reviewer_1/dataset_1_quality_unlabeled.xlsx",
+                "app/util/validation/datasets/requirement_quality/reviewer_2/dataset_2_quality_unlabeled.xlsx",
+                "app/util/validation/datasets/requirement_quality/reviewer_3/dataset_3_quality_unlabeled.xlsx",
+                "app/util/validation/datasets/requirement_quality/reviewer_3/dataset_4_quality_unlabeled.xlsx",
+                "app/util/validation/datasets/requirement_quality/reviewer_4/dataset_5_quality_unlabeled.xlsx",
+                "app/util/validation/datasets/requirement_quality/reviewer_5/dataset_6_quality_unlabeled.xlsx"
+            ]
+
+            df = pd.concat((pd.read_excel(f) for f in files), ignore_index=True)
+        else:
+            df = pd.read_excel('app/datasets/requirement_quality/' + QUALITY_FILE_NAME)
+
+    if(load_quality):
+        col0, target_col = df.columns[0], df.columns[index]
+    else:
+        col0, target_col = df.columns[0], df.columns[1]
+    df = df[[col0, target_col]].rename(columns={col0: 'text', target_col: 'classification'})
+
+    print(df['classification'].value_counts())
+
+    df['classification'] = df['classification'].map({True: 1, False: 0})
+    # df['classification'] = df['classification'].map({'T': 1, 'F': 0})
+
+    # Rebalance
+
+    minority_class = df[df['classification'] == df['classification'].value_counts().idxmin()]
+    majority_class = df[df['classification'] == df['classification'].value_counts().idxmax()]
+
+    # Oversample the minority class
+    oversampled_minority = minority_class.sample(len(majority_class), replace=True)
+
+    # Combine to get the balanced dataset
+    df = pd.concat([majority_class, oversampled_minority], axis=0).sample(frac=1, random_state=random_state).reset_index(drop=True)
+
+    df['text'] = df['text'].astype(str)
+
+    print(df['classification'].value_counts())
+
+    # Randomize the entries
+    df = df.sample(len(df) * 1, random_state=random_state, replace=True)
+
+    tokenizer = AutoTokenizer.from_pretrained("xlnet-base-cased")
+    # model = BertForSequenceClassification.from_pretrained("bert-base-uncased",
+    #                                                       hidden_dropout_prob=0.2,
+    #                                                       attention_probs_dropout_prob=0.2,
+    #                                                       num_labels=2)
+
+    config = XLNetConfig.from_pretrained("xlnet-base-cased", hidden_dropout_prob=0.2, attention_probs_dropout_prob=0.2, num_labels=2)
+    model = XLNetForSequenceClassification.from_pretrained("xlnet-base-cased",
+                                                          config=config)
 
     dataset = Dataset.from_pandas(df)
 
@@ -967,7 +1238,7 @@ def train_bert(load_quality = True, index = 4, load_reviewer = True):
         learning_rate=1e-5,
         per_device_train_batch_size=32,
         per_device_eval_batch_size=32,
-        num_train_epochs=50,
+        num_train_epochs=10,
         weight_decay=0.05,
         load_best_model_at_end=True,
         greater_is_better=True,
@@ -992,162 +1263,11 @@ def train_bert(load_quality = True, index = 4, load_reviewer = True):
     test_preds = np.argmax(test_predictions.predictions, axis=1)
 
     print("Classification Report for Test Data")
-    visualize(test_labels, test_preds, "BERT Confusion Matrix")
+    # visualize(test_labels, test_preds, "BERT Confusion Matrix")
     print(classification_report(test_labels, test_preds, target_names=["Class 0 (F)", "Class 1 (T)"]))
 
     model.save_pretrained("../models/bert-base-requirements-identification-generative-ai")
-
-
-
-def train_xl_net(load_quality = True, index = 4, load_reviewer = True):
-
-
-    if(load_quality == False):
-        if (load_reviewer):
-            files = [
-                "app/util/validation/datasets/requirement_identification/reviewer_1/dataset_1_unlabeled_req.xlsx",
-                "app/util/validation/datasets/requirement_identification/reviewer_2/dataset_2_unlabeled_req.xlsx",
-                "app/util/validation/datasets/requirement_identification/reviewer_3/dataset_3_unlabeled_req.xlsx",
-                "app/util/validation/datasets/requirement_identification/reviewer_3/dataset_4_unlabeled_req.xlsx",
-                "app/util/validation/datasets/requirement_identification/reviewer_4/dataset_5_unlabeled_req.xlsx",
-                "app/util/validation/datasets/requirement_identification/reviewer_5/dataset_6_unlabeled_req.xlsx"
-            ]
-            df = pd.concat((pd.read_excel(f) for f in files), ignore_index=True)
-        else:
-            df = pd.read_csv('app/datasets/requirement_identification/PURE_train.csv')
-    else:
-
-        if (load_reviewer):
-            files = [
-                "app/util/validation/datasets/requirement_quality/reviewer_1/dataset_1_quality_unlabeled.xlsx",
-                "app/util/validation/datasets/requirement_quality/reviewer_2/dataset_2_quality_unlabeled.xlsx",
-                "app/util/validation/datasets/requirement_quality/reviewer_3/dataset_3_quality_unlabeled.xlsx",
-                "app/util/validation/datasets/requirement_quality/reviewer_3/dataset_4_quality_unlabeled.xlsx",
-                "app/util/validation/datasets/requirement_quality/reviewer_4/dataset_5_quality_unlabeled.xlsx",
-                "app/util/validation/datasets/requirement_quality/reviewer_5/dataset_6_quality_unlabeled.xlsx"
-            ]
-
-            df = pd.concat((pd.read_excel(f) for f in files), ignore_index=True)
-        else:
-            df = pd.read_excel('app/datasets/requirement_quality/' + QUALITY_FILE_NAME)
-
-    if(load_quality):
-        col0, target_col = df.columns[0], df.columns[index]
-    else:
-        col0, target_col = df.columns[0], df.columns[1]
-    df = df[[col0, target_col]].rename(columns={col0: 'text', target_col: 'classification'})
-
-    print(df['classification'].value_counts())
-
-    df['classification'] = df['classification'].map({True: 1, False: 0})
-
-    return
-    # Rebalance
-
-    minority_class = df[df['classification'] == df['classification'].value_counts().idxmin()]
-    majority_class = df[df['classification'] == df['classification'].value_counts().idxmax()]
-
-    # Oversample the minority class
-    oversampled_minority = minority_class.sample(len(majority_class), replace=True)
-
-    # Combine to get the balanced dataset
-    df = pd.concat([majority_class, oversampled_minority], axis=0).sample(frac=1).reset_index(drop=True)
-
-    df['text'] = df['text'].astype(str)
-
-    print(df['classification'].value_counts())
-
-    # Randomize the entries
-    # df = df.sample(len(df) * 5, random_state=35, replace=True)
-
-    tokenizer = AutoTokenizer.from_pretrained("xlnet-base-cased")
-    # model = BertForSequenceClassification.from_pretrained("bert-base-uncased",
-    #                                                       hidden_dropout_prob=0.2,
-    #                                                       attention_probs_dropout_prob=0.2,
-    #                                                       num_labels=2)
-
-    config = XLNetConfig.from_pretrained("xlnet-base-cased", hidden_dropout_prob=0.2, attention_probs_dropout_prob=0.2, num_labels=2)
-    model = XLNetForSequenceClassification.from_pretrained("xlnet-base-cased",
-                                                          config=config)
-
-    dataset = Dataset.from_pandas(df)
-
-    def tokenize_function(examples):
-        return tokenizer(
-            examples['text'],
-            truncation=True,
-            max_length=64,
-            padding="max_length"
-        )
-
-
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
-    tokenized_dataset = tokenized_dataset.map(lambda examples: {'labels': examples['classification']}, batched=True)
-
-    split_dataset = tokenized_dataset.train_test_split(test_size=0.3)
-
-    train_dataset = split_dataset['train']
-    eval_dataset = split_dataset['test']
-
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-
-    def compute_metrics(pred):
-        labels = pred.label_ids
-        preds = np.argmax(pred.predictions, axis=1)
-
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average=None)
-        accuracy = accuracy_score(labels, preds)
-
-        metrics = {
-            'accuracy': accuracy
-        }
-
-        for i in range(len(precision)):
-            metrics[f'precision_class_{i}'] = precision[i]
-            metrics[f'recall_class_{i}'] = recall[i]
-            metrics[f'f1_class_{i}'] = f1[i]
-
-        return metrics
-
-    training_args = TrainingArguments(
-        output_dir='../bert-binary-classification-results',
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=1,
-        learning_rate=1e-5,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=32,
-        num_train_epochs=50,
-        weight_decay=0.05,
-        load_best_model_at_end=True,
-        greater_is_better=True,
-        metric_for_best_model="eval_accuracy",
-        logging_strategy="epoch"
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-    )
-
-    trainer.train()
-
-    test_predictions = trainer.predict(eval_dataset)
-    test_labels = test_predictions.label_ids
-    test_preds = np.argmax(test_predictions.predictions, axis=1)
-
-    print("Classification Report for Test Data")
-    visualize(test_labels, test_preds, "BERT Confusion Matrix")
-    print(classification_report(test_labels, test_preds, target_names=["Class 0 (F)", "Class 1 (T)"]))
-
-    model.save_pretrained("../models/bert-base-requirements-identification-generative-ai")
-
+    return classification_report(test_labels, test_preds, target_names=["Class 0", "Class 1"], output_dict=True)
 
 import pandas as pd
 import torch
@@ -1160,7 +1280,7 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 import random
 
-def train_bert_few_shot(load_quality = True, index = 4, load_reviewer = True):
+def train_bert_few_shot(load_quality = True, index = 4, load_reviewer = True, random_state=42):
 
     if(load_quality == False):
         if (load_reviewer):
@@ -1200,12 +1320,13 @@ def train_bert_few_shot(load_quality = True, index = 4, load_reviewer = True):
     print(df['classification'].value_counts())
 
     df['classification'] = df['classification'].map({True: 1, False: 0})
+    # df['classification'] = df['classification'].map({'T': 1, 'F': 0})
 
     df['text'] = df['text'].astype(str)
 
     # Few-shot sampling
     few_shot_df = df.groupby('classification', group_keys=False).apply(
-        lambda x: x.sample(n=40, random_state=42)
+        lambda x: x.sample(n=40, random_state=random_state)
     ).reset_index(drop=True)
 
     tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
@@ -1282,7 +1403,7 @@ def train_bert_few_shot(load_quality = True, index = 4, load_reviewer = True):
     loss_fn = nn.TripletMarginLoss(margin=0.5)
 
     encoder.train()
-    for epoch in range(4):
+    for epoch in range(6):
         total_loss = 0
         for batch, _ in triplet_loader:
             anchor = {k: v[0] for k, v in batch.items()}
@@ -1330,7 +1451,7 @@ def train_bert_few_shot(load_quality = True, index = 4, load_reviewer = True):
     clf = LogisticRegression(max_iter=1000)
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
-    visualize(y_test, y_pred, "Few Shot Confusion Matrix")
+    return classification_report(y_test, y_pred, target_names=["Class 0", "Class 1"], output_dict=True)
 
 class SiameseDataset(TorchDataset):
     def __init__(self, df, tokenizer, num_pairs=1000):
@@ -1397,7 +1518,7 @@ def cosine_contrastive_loss(out1, out2, labels, margin=0.5):
     loss = labels * (1 - cos) ** 2 + (1 - labels) * torch.clamp(cos - margin, min=0) ** 2
     return loss.mean()
 
-def train_siamese_model(load_quality = True, index = 1, load_reviewer = True):
+def train_siamese_model(load_quality = True, index = 4, load_reviewer = True, random_state=42):
 
     if(load_quality == False):
         if (load_reviewer):
@@ -1438,11 +1559,13 @@ def train_siamese_model(load_quality = True, index = 1, load_reviewer = True):
 
     df = df.sample(frac=1).reset_index(drop=True)
     df['classification'] = df['classification'].map({True: 1, False: 0})
+    # df['classification'] = df['classification'].map({'T': 1, 'F': 0})
+
     df['text'] = df['text'].astype(str)
 
     tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
     model = SiameseBERT('distilbert-base-uncased')
-    dataset = SiameseDataset(df, tokenizer, num_pairs=400)
+    dataset = SiameseDataset(df, tokenizer, num_pairs=100)
     loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-5)
@@ -1476,7 +1599,7 @@ def train_siamese_model(load_quality = True, index = 1, load_reviewer = True):
     labels = torch.tensor(labels)
 
     # Few-shot reference set
-    ref_df = df.groupby('classification', group_keys=False).apply(lambda x: x.sample(n=5, random_state=42)).reset_index(drop=True)
+    ref_df = df.groupby('classification', group_keys=False).apply(lambda x: x.sample(n=5, random_state=random_state)).reset_index(drop=True)
     ref_texts = ref_df['text'].tolist()
     ref_labels = ref_df['classification'].tolist()
 
@@ -1491,23 +1614,24 @@ def train_siamese_model(load_quality = True, index = 1, load_reviewer = True):
         pred_label = ref_labels[torch.argmax(sims).item()]
         preds.append(pred_label)
 
-    visualize(labels, preds, "Siamese BERT Confusion Matrix")
+    # visualize(labels, preds, "Siamese BERT Confusion Matrix")
     # Reduce embeddings to 2D using t-SNE
-    tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42)
-    emb_2d = tsne.fit_transform(embeddings.numpy())
+    # tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42)
+    # emb_2d = tsne.fit_transform(embeddings.numpy())
 
     # Plot
-    plt.figure(figsize=(8, 6))
-    colors = ['blue' if label == 0 else 'red' for label in labels]
-    plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=colors, alpha=0.7, label='Embeddings')
-    plt.title('Siamese BERT Embedding Space (t-SNE)')
-    plt.xlabel('Component 1')
-    plt.ylabel('Component 2')
-    plt.grid(True)
-    plt.show()
+    # plt.figure(figsize=(8, 6))
+    # colors = ['blue' if label == 0 else 'red' for label in labels]
+    # plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=colors, alpha=0.7, label='Embeddings')
+    # plt.title('Siamese BERT Embedding Space (t-SNE)')
+    # plt.xlabel('Component 1')
+    # plt.ylabel('Component 2')
+    # plt.grid(True)
+    # plt.show()
 
-    model.encoder.save_pretrained("app/models/requirement_identification/bert-base-requirements-identification-generative-ai-siamese")
-    tokenizer.save_pretrained("app/models/requirement_identification/bert-base-requirements-identification-generative-ai-siamese")
+    # model.encoder.save_pretrained("app/models/requirement_identification/bert-base-requirements-identification-generative-ai-siamese")
+    # tokenizer.save_pretrained("app/models/requirement_identification/bert-base-requirements-identification-generative-ai-siamese")
+    return classification_report(labels, preds, target_names=["Class 0", "Class 1"], output_dict=True)
 
 
 from transformers import AutoTokenizer, AutoModel
@@ -1594,4 +1718,117 @@ def test():
 
 
 # print(derive_fleiss_kappa())
-train_siamese_model()
+
+# train_rnn()
+
+# Store results for each ensemble type
+# results = {
+#     "average_ensemble": [],
+#     "majority_vote_ensemble": [],
+#     "logistic_regression_meta_model": [],
+#     "gradient_boost_meta_model": []
+# }
+#
+# # Run 10 iterations
+# for i in range(10):
+#     reports = train_ensemble(random_state=i + 42)  # vary seed slightly for randomness
+#
+#     # Loop through each model report
+#     for model_name, report in reports.items():
+#         # Collect metrics for binary classes
+#         results[model_name].append({
+#             "class_0_precision": report["Class 0"]["precision"],
+#             "class_0_recall": report["Class 0"]["recall"],
+#             "class_0_f1": report["Class 0"]["f1-score"],
+#             "accuracy": report["accuracy"],
+#             "class_1_precision": report["Class 1"]["precision"],
+#             "class_1_recall": report["Class 1"]["recall"],
+#             "class_1_f1": report["Class 1"]["f1-score"],
+#             "accuracy_1": report["accuracy"]
+#         })
+#
+# # Export each to Excel
+# for model_name, model_results in results.items():
+#     df = pd.DataFrame(model_results)
+#     filename = f"{model_name}_results.xlsx"
+#     df.to_excel(filename, index=False)
+#     print(f"Saved: {filename}")
+
+results = []
+for i in range(10):
+    report = train_bert(random_state=42 + i)
+    results.append({
+        "class_0_precision": report["Class 0"]["precision"],
+        "class_0_recall": report["Class 0"]["recall"],
+        "class_0_f1": report["Class 0"]["f1-score"],
+        "accuracy": report["accuracy"],
+        "class_1_precision": report["Class 1"]["precision"],
+        "class_1_recall": report["Class 1"]["recall"],
+        "class_1_f1": report["Class 1"]["f1-score"],
+        "accuracy_1": report["accuracy"]
+    })
+
+df = pd.DataFrame(results)
+filename = f"bert_results.xlsx"
+df.to_excel(filename, index=False)
+print(f"Saved: {filename}")
+
+
+results = []
+for i in range(10):
+    report = train_xl_net(random_state=42 + i)
+    results.append({
+        "class_0_precision": report["Class 0"]["precision"],
+        "class_0_recall": report["Class 0"]["recall"],
+        "class_0_f1": report["Class 0"]["f1-score"],
+        "accuracy": report["accuracy"],
+        "class_1_precision": report["Class 1"]["precision"],
+        "class_1_recall": report["Class 1"]["recall"],
+        "class_1_f1": report["Class 1"]["f1-score"],
+        "accuracy_1": report["accuracy"]
+    })
+
+df = pd.DataFrame(results)
+filename = f"xlnet_results.xlsx"
+df.to_excel(filename, index=False)
+print(f"Saved: {filename}")
+
+
+results = []
+for i in range(10):
+    report = train_bert_few_shot(random_state=42 + i)
+    results.append({
+        "class_0_precision": report["Class 0"]["precision"],
+        "class_0_recall": report["Class 0"]["recall"],
+        "class_0_f1": report["Class 0"]["f1-score"],
+        "accuracy": report["accuracy"],
+        "class_1_precision": report["Class 1"]["precision"],
+        "class_1_recall": report["Class 1"]["recall"],
+        "class_1_f1": report["Class 1"]["f1-score"],
+        "accuracy_1": report["accuracy"]
+    })
+
+df = pd.DataFrame(results)
+filename = f"few_shot_results.xlsx"
+df.to_excel(filename, index=False)
+print(f"Saved: {filename}")
+
+
+results = []
+for i in range(10):
+    report = train_siamese_model(random_state=42 + i)
+    results.append({
+    "class_0_precision": report["Class 0"]["precision"],
+        "class_0_recall": report["Class 0"]["recall"],
+        "class_0_f1": report["Class 0"]["f1-score"],
+        "accuracy": report["accuracy"],
+        "class_1_precision": report["Class 1"]["precision"],
+        "class_1_recall": report["Class 1"]["recall"],
+        "class_1_f1": report["Class 1"]["f1-score"],
+        "accuracy_1": report["accuracy"]
+    })
+
+df = pd.DataFrame(results)
+filename = f"siamese_results.xlsx"
+df.to_excel(filename, index=False)
+print(f"Saved: {filename}")
