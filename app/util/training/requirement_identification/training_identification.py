@@ -1,4 +1,3 @@
-from numpy.f2py.crackfortran import verbose
 from transformers import DataCollatorWithPadding, BertForSequenceClassification, EarlyStoppingCallback, \
     TrainingArguments, Trainer, XLNetForSequenceClassification, XLNetConfig
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report

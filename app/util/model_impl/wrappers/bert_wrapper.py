@@ -2,12 +2,14 @@ from transformers import AutoTokenizer, BertForSequenceClassification, BitsAndBy
 import torch
 label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result_binary_singularity",
                  "result_binary_verifiability"]
+import os
 
 import shap
 import re
 from scipy.ndimage import gaussian_filter1d
 import numpy as np
 from reportlab.lib import colors
+from pathlib import Path
 
 label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result_binary_singularity",
                  "result_binary_verifiability"]
@@ -35,9 +37,15 @@ class BertWrapper:
             bnb_8bit_compute_dtype=torch.float16
         )
 
-        self.model = BertForSequenceClassification.from_pretrained(model_path, output_attentions=True)
+        BASE_DIR = Path(__file__).resolve().parent
+        model_path = BASE_DIR / "../../models/requirement_quality/bert-requirement-classifier"
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        # Convert to string with forward slashes
+        model_path = str(model_path.resolve().as_posix())
+
+        # Load tokenizer and model
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
+        self.model = BertForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
 
         self.explainer = shap.Explainer(self.__predict_function__, self.tokenizer, batch_size=32, max_evals=explainer_max_evals, algorithm="partition", n_jobs=-1)
 
