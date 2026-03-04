@@ -18,3 +18,5 @@ spacy
 shap
 reportlab
 openpyxl
+flask-limiter
+python-dotenv
