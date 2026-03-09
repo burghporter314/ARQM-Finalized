@@ -14,7 +14,6 @@ class GenerativeQualityModel:
         """
         Initializes a GenerativeQualityModel object
         """
-
         self.bert_wrapper = BertWrapper(violation_threshold=.70, display_ngram_summary=False)
 
     def getOverallQuality(self, texts, batch_size=32, visualize_pdf = True):

@@ -1,18 +1,16 @@
 from transformers import AutoTokenizer, BertForSequenceClassification, BitsAndBytesConfig
 import torch
-label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result_binary_singularity",
-                 "result_binary_verifiability"]
-import os
-
 import shap
-import re
-from scipy.ndimage import gaussian_filter1d
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 from reportlab.lib import colors
 from pathlib import Path
+from collections import defaultdict, Counter
+from datetime import datetime
+import statistics
 
-label_columns = ["result_binary_ambiguity", "result_binary_feasibility", "result_binary_singularity",
-                 "result_binary_verifiability"]
+label_columns = ["result_binary_ambiguity", "result_binary_feasibility",
+                 "result_binary_singularity", "result_binary_verifiability"]
 
 LABEL_MAPPING = {
     "result_binary_singularity": "Singularity",
@@ -23,101 +21,107 @@ LABEL_MAPPING = {
 
 class BertWrapper:
 
-    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True, explainer_max_evals=50, model_path='app/models/requirement_quality/bert-requirement-classifier'):
+    def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True,
+                 model_path='C:/Users/Dr. Porter/Desktop/ARQM-Finalized/app/models/requirement_quality/bert-requirement-classifier'):
 
-        self.violation_threshold=violation_threshold
-        self.max_n_grams=max_n_grams
-        self.model_path = model_path
+        self.violation_threshold = violation_threshold
+        self.max_n_grams = max_n_grams
         self.display_ngram_summary = display_ngram_summary
 
+        # Use the exact absolute path
+        model_path = Path(model_path).resolve()
 
-        bnb_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            bnb_8bit_use_double_quant=True,
-            bnb_8bit_compute_dtype=torch.float16
+        if not model_path.exists():
+            raise FileNotFoundError(f"BERT model path does not exist: {model_path}")
+
+        print("Loading BERT model from:", model_path)
+
+        # Load tokenizer and model from local files only
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            local_files_only=True
+        )
+        self.model = BertForSequenceClassification.from_pretrained(
+            model_path,
+            local_files_only=True
         )
 
-        BASE_DIR = Path(__file__).resolve().parent
-        model_path = BASE_DIR / "../../models/requirement_quality/bert-requirement-classifier"
+        # Move model to GPU if available
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.model.eval()
 
-        # Convert to string with forward slashes
-        model_path = str(model_path.resolve().as_posix())
+        # SHAP explainer
+        self.explainer = shap.Explainer(
+            self.__predict_function__,
+            self.tokenizer,
+            batch_size=32,
+            algorithm="partition",
+            n_jobs=-1
+        )
 
-        # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
-        self.model = BertForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
-
-        self.explainer = shap.Explainer(self.__predict_function__, self.tokenizer, batch_size=32, max_evals=explainer_max_evals, algorithm="partition", n_jobs=-1)
-
-        self.explainer_max_evals = explainer_max_evals
-
-
+    # ---------------- GPU-enabled prediction function ----------------
     def __predict_function__(self, texts):
-        inputs = self.tokenizer(texts.tolist(), padding=True, truncation=True, return_tensors='pt', max_length=32)
+        # Force input to be a list of strings
+        if isinstance(texts, str):
+            texts = [texts]
+        elif isinstance(texts, np.ndarray):
+            texts = texts.tolist()
+        else:
+            # Ensure every item is string
+            texts = [str(t) for t in texts]
+
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=32,
+            return_tensors="pt"
+        ).to(self.device)
 
         with torch.no_grad():
             logits = self.model(**inputs).logits
+
         return torch.sigmoid(logits).cpu().numpy()
 
-
+    # ---------------- Helper methods ----------------
     def __apply_gaussian_smoothing__(self, impacts, sigma=1.2):
         return gaussian_filter1d(impacts, sigma=sigma)
 
     def __get_gradient_color__(self, weighted_val, max_val):
         if max_val == 0:
             return colors.white
-
-        # Normalize between 0 (no impact) and 1 (strong negative impact)
         norm_val = abs(weighted_val) / max_val
-        norm_val = max(0, min(1, norm_val))  # Clamp to [0, 1]
-
-        # White → Red gradient
-        r = 255
-        g = int(255 * (1 - norm_val))
-        b = int(255 * (1 - norm_val))
-
-        # Optional: pastel soften
+        norm_val = max(0, min(1, norm_val))
+        r, g, b = 255, int(255*(1-norm_val)), int(255*(1-norm_val))
         pastel_factor = 0.4
-        r = int(pastel_factor * 255 + (1 - pastel_factor) * r)
-        g = int(pastel_factor * 255 + (1 - pastel_factor) * g)
-        b = int(pastel_factor * 255 + (1 - pastel_factor) * b)
-
-        return colors.Color(r / 255, g / 255, b / 255)
+        r = int(pastel_factor*255 + (1-pastel_factor)*r)
+        g = int(pastel_factor*255 + (1-pastel_factor)*g)
+        b = int(pastel_factor*255 + (1-pastel_factor)*b)
+        return colors.Color(r/255, g/255, b/255)
 
     def __weight_ngrams_for_visualization__(self, ngram_summary, label_name):
         weighted_ngrams = []
         is_ambiguity = label_name.lower() == "ambiguity"
-
         for n, ngram, score in ngram_summary:
-
-            weight = n
-            adjusted_score = score * weight
-
+            adjusted_score = score * n
             if is_ambiguity:
                 adjusted_score *= -1
-
             weighted_ngrams.append((n, ngram, adjusted_score))
-
         return weighted_ngrams
 
-
     def __get_top_ngrams__(self, words, shap_scores, n=2, top_k=3):
-        """Extracts top n-grams with highest SHAP importance."""
         if len(words) < n:
-            return []  # Skip if text is too short for n-grams
-        ngrams = [" ".join(words[i:i + n]) for i in range(len(words) - n + 1)]
-        ngram_scores = [sum(shap_scores[i:i + n]) for i in range(len(shap_scores) - n + 1)]
+            return []
+        ngrams = [" ".join(words[i:i+n]) for i in range(len(words)-n+1)]
+        ngram_scores = [sum(shap_scores[i:i+n]) for i in range(len(shap_scores)-n+1)]
         return sorted(zip(ngrams, ngram_scores), key=lambda x: abs(x[1]), reverse=True)[:top_k]
 
     def __get_top_ngrams_by_size__(self, ngram_summary, label_name, top_n=5):
         is_ambiguity = label_name.lower() == "ambiguity"
-        ngram_groups = {}
-
+        ngram_groups = defaultdict(list)
         for n, ngram, score in ngram_summary:
-            if n not in ngram_groups:
-                ngram_groups[n] = []
             ngram_groups[n].append((ngram, score))
-
         for n in ngram_groups:
             sorted_ngrams = sorted(
                 ngram_groups[n],
@@ -125,9 +129,9 @@ class BertWrapper:
                 reverse=is_ambiguity
             )
             ngram_groups[n] = sorted_ngrams[:top_n]
-
         return ngram_groups
 
+    # ---------------- PDF visualization ----------------
     def __visualize_explanations_to_pdf__(self, visualization_data, filename="ARQM_Report.pdf", filter_labels=None,
                                           show_average=True):
         from reportlab.lib.pagesizes import letter
@@ -389,14 +393,14 @@ class BertWrapper:
 
         c.save()
 
-    def predict_requirement_v2(self, texts, word_offset_percent=0.25, visualize_pdf = True):
+    # ---------------- Main prediction function ----------------
+    def predict_requirement_v2(self, texts, word_offset_percent=0.25, visualize_pdf=True):
 
         truncated_texts = []
         for text in texts:
             words = text.split()
             cutoff = max(1, int(len(words) * word_offset_percent))
-            truncated_text = " ".join(words[cutoff:])
-            truncated_texts.append(truncated_text)
+            truncated_texts.append(" ".join(words[cutoff:]))
 
         inputs = self.tokenizer(
             truncated_texts,
@@ -404,54 +408,57 @@ class BertWrapper:
             padding="max_length",
             max_length=32,
             return_tensors="pt"
-        )
+        ).to(self.device)
 
         with torch.no_grad():
             outputs = self.model(**inputs)
         logits = outputs.logits
         probs = torch.sigmoid(logits).cpu().numpy()
 
-        if(visualize_pdf == False):
+        if not visualize_pdf:
             return probs
 
-        else:
-            explain_indices = []
-            for i in range(len(truncated_texts)):
-                p = probs[i]
-                if p[0] > self.violation_threshold or any(p[j] < 1 - self.violation_threshold for j in [1, 2, 3]):
-                    explain_indices.append(i)
+        # SHAP explanation
+        explain_indices = [
+            i for i, p in enumerate(probs)
+            if p[0] > self.violation_threshold or any(p[j] < 1 - self.violation_threshold for j in [1,2,3])
+        ]
 
-            shap_values = self.explainer([truncated_texts[i] for i in explain_indices]) if explain_indices else None
+        test_text = "This requirement must be clear and unambiguous."
+        output = self.__predict_function__(test_text)
+        print("Output shape:", output.shape)
+        print("Output:", output)
+        shap_values = self.explainer([truncated_texts[i] for i in explain_indices]) if explain_indices else None
+        visualization_data = []
 
-            visualization_data = []
+        for i in range(len(truncated_texts)):
+            if i in explain_indices:
+                sv_idx = explain_indices.index(i)
+                words = shap_values.data[sv_idx]
+                for j, label in enumerate(label_columns):
+                    p = probs[i][j]
+                    if (j == 0 and p > self.violation_threshold) or (j in [1,2,3] and p < 1 - self.violation_threshold):
+                        shap_scores = shap_values.values[sv_idx][:, j]
+                        impacts = [0.0] * len(words)
+                        ngram_summary = []
 
-            for i in range(len(truncated_texts)):
-                if i in explain_indices:
-                    sv_idx = explain_indices.index(i)
-                    words = shap_values.data[sv_idx]
+                        words = list(map(str, shap_values.data[sv_idx]))
+                        for n in range(1, self.max_n_grams + 1):
+                            top_ngrams = self.__get_top_ngrams__(words, shap_scores, n=n)
+                            for ngram, score in top_ngrams:
+                                ngram_summary.append((n, ngram, score))
+                                ngram_tokens = ngram.split()
+                                for k in range(len(words) - len(ngram_tokens) + 1):
+                                    if words[k:k+len(ngram_tokens)] == ngram_tokens:
+                                        for t in range(len(ngram_tokens)):
+                                            impacts[k+t] += score
 
-                    for j, label in enumerate(label_columns):
-                        p = probs[i][j]
-                        if (j == 0 and p > self.violation_threshold) or (j in [1, 2, 3] and p < 1 - self.violation_threshold):
-                            shap_scores = shap_values.values[sv_idx][:, j]
-                            impacts = [0.0] * len(words)
-                            ngram_summary = []
+                        certainty = probs[i][j]*100
+                        visualization_data.append(
+                            (texts[i], truncated_texts[i], words, impacts, ngram_summary, i, label, certainty)
+                        )
 
-                            words = list(map(str, shap_values.data[sv_idx]))
-                            for n in range(1, self.max_n_grams + 1):
-                                top_ngrams = self.__get_top_ngrams__(words, shap_scores, n=n)
-                                for ngram, score in top_ngrams:
-                                    ngram_summary.append((n, ngram, score))
-                                    ngram_tokens = ngram.split()
-                                    for k in range(len(words) - len(ngram_tokens) + 1):
-                                        if words[k:k + len(ngram_tokens)] == ngram_tokens:
-                                            for t in range(len(ngram_tokens)):
-                                                impacts[k + t] += score
+        if visualization_data:
+            self.__visualize_explanations_to_pdf__(visualization_data)
 
-                            # Add to visualization list
-                            certainty = probs[i][j] * 100
-                            visualization_data.append((texts[i], truncated_texts[i], words, impacts, ngram_summary, i, label, certainty))
-
-            if visualization_data:
-                self.__visualize_explanations_to_pdf__(visualization_data)
-            return probs
+        return probs
