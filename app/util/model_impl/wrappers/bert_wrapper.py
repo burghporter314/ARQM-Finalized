@@ -22,17 +22,11 @@ LABEL_MAPPING = {
 class BertWrapper:
 
     def __init__(self, violation_threshold=0.5, max_n_grams=5, display_ngram_summary=True,
-                 model_path='C:/Users/Dr. Porter/Desktop/ARQM-Finalized/app/models/requirement_quality/bert-requirement-classifier'):
+                 model_path='app/models/requirement_quality/bert-requirement-classifier'):
 
         self.violation_threshold = violation_threshold
         self.max_n_grams = max_n_grams
         self.display_ngram_summary = display_ngram_summary
-
-        # Use the exact absolute path
-        model_path = Path(model_path).resolve()
-
-        if not model_path.exists():
-            raise FileNotFoundError(f"BERT model path does not exist: {model_path}")
 
         print("Loading BERT model from:", model_path)
 

@@ -1,5 +1,5 @@
 # Use official Python image
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # Prevent Python from writing .pyc files
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -16,7 +16,8 @@ COPY requirements.txt .
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install torch torchvision torchaudio
+# after installing other requirements
+RUN pip install torch==2.10.0+cu128 torchvision==0.25.0+cu128 torchaudio==2.10.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 RUN python -m spacy download en_core_web_sm
 
 
